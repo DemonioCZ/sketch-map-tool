@@ -16,7 +16,7 @@ def detect_markings(
     # masks represent markings
     masks, colors = apply_ml_pipeline(img, yolo_model, sam_predictor)
     colors = [int(c) + 1 for c in colors]  # +1 because 0 is background
-    return create_marking_array(masks, colors, image)
+    return masks, colors, img
 
 
 def apply_ml_pipeline(

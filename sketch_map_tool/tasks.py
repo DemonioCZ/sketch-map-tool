@@ -25,8 +25,9 @@ from sketch_map_tool.upload_processing import (
     merge,
     polygonize,
 )
-from sketch_map_tool.upload_processing.detect_markings import detect_markings
+from sketch_map_tool.upload_processing.detect_markings import detect_markings, create_marking_array
 from sketch_map_tool.upload_processing.ml_models import init_model
+from sketch_map_tool.upload_processing.postprocess import postprocess
 from sketch_map_tool.wms import client as wms_client
 
 
@@ -149,13 +150,18 @@ def digitize_sketches(
         r = db_client_celery.select_file(sketch_map_id)
         r = to_array(r)
         r = clip(r, map_frames[uuid])
-        r = detect_markings(r, yolo_model, sam_predictor)
-        r = georeference(r, bbox, bgr=False)
-        r = polygonize(r, name)
-        r = geojson.load(r)
-        r = clean(r)
-        r = enrich(r, {"name": name})
-        return r
+        masks, colors, img = detect_markings(r, yolo_model, sam_predictor)
+        geojsons = []
+
+        for mask,color in zip(masks,colors):
+            _r = create_marking_array([mask], [color], img)
+            _r = georeference(_r, bbox, bgr=False)
+            _r = polygonize(_r, name)
+            _r = geojson.load(_r)
+            _r = clean(_r)
+            _r = enrich(_r, {"name": name})
+            geojsons.append(postprocess(_r))
+        return merge(geojsons)
 
     return merge(
         [
