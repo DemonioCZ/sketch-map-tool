@@ -21,17 +21,112 @@ from sketch_map_tool.models import Bbox, Layer, PaperFormat, Size
 from sketch_map_tool.upload_processing import clip
 from tests import FIXTURE_DIR
 
+from docker.models.containers import Container
+from testcontainers.postgres import PostgresContainer
+from testcontainers.core.container import DockerContainer, logger
+from testcontainers.core.docker_client import DockerClient as OriginalDockerClient, _stop_container
 
 #
 # Session wide test setup of DB (redis and postgres) and workers (flask and celery)
 #
+
+class DockerClient(OriginalDockerClient):
+    def find_container_by_name(self, name: str) -> Container | None:
+        for cnt in self.client.containers.list(all=True):
+            if cnt.name == name:
+                return cnt
+        return None
+
+
+class PermanentContainer(DockerContainer):
+    """
+    Docker testing container that has ability to keep using same container
+    for multiple test runs.
+
+    If it is configured so, it does not destroy container
+    at the end of test run. Same container is reused next time. It is required to
+    configure container name when this feature is used, since name of the container
+    is used to find container from previous run.
+
+    To enable, pass "keep_container" to init or use "with_keep_container" function.
+
+    Default value is based on detection of CI environment. CI environment is considered
+    every environment that has "CI" environment variable set. If current env is CI,
+    keep_container is False by default, otherwise it is True by default.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self._keep_container = kwargs.pop("keep_container",  False)
+        super().__init__(*args, **kwargs)
+
+    def start(self):
+        # return as fast as possible, if not using keep container
+        if not self._keep_container:
+            logger.info("Pulling image %s", self.image)
+            docker_client = self.get_docker_client()
+            self._container = docker_client.run(self.image,
+                                                command=self._command,
+                                                detach=True,
+                                                environment=self.env,
+                                                ports=self.ports,
+                                                name=self._name,
+                                                volumes=self.volumes,
+                                                **self._kwargs
+                                                )
+            logger.info("Container started: %s", self._container.short_id)
+            return self
+
+        if self._keep_container and not self._name:
+            raise Exception("If keep_container is used, name of container must be set")
+
+        existing_container = self.get_docker_client().find_container_by_name(self._name)
+        if existing_container:
+            if existing_container.status != "running":
+                existing_container.start()
+            logger.info("Using existing container %s", existing_container.id)
+            self._container = existing_container
+            return self
+
+        # since container is not found, this is probably the first run
+        logger.info("Pulling image %s", self.image)
+        docker_client = self.get_docker_client()
+        self._container = docker_client.run(self.image,
+                                            command=self._command,
+                                            detach=True,
+                                            environment=self.env,
+                                            ports=self.ports,
+                                            name=self._name,
+                                            volumes=self.volumes,
+                                            **self._kwargs
+                                            )
+        logger.info("Container started: %s", self._container.short_id)
+        return self
+
+    def stop(self, force=True, delete_volume=True):
+        if self._keep_container:
+            return
+        return super().stop(force, delete_volume)
+
+    def get_docker_client(self) -> DockerClient:
+        return DockerClient()
+
+    def with_keep_container(self, keep: bool = True):
+        self._keep_container = keep
+
+class PermanentPostgresContainer(PostgresContainer, PermanentContainer):
+    """
+    Postgres variant of permanent container. See docs for PermanentContainer for details.
+    """
+    pass
+
+
 @pytest.fixture(scope="session", autouse=True)
 def postgres_container(monkeypatch_session):
     """Spin up a Postgres container available for all tests.
 
     Connection string will be different for each test session.
     """
-    with PostgresContainer("postgres:15") as postgres:
+    with PermanentPostgresContainer("postgres:15").with_name("smt-db").with_keep_container() as postgres:
         conn = "db+postgresql://{user}:{password}@127.0.0.1:{port}/{database}".format(
             user=postgres.POSTGRES_USER,
             password=postgres.POSTGRES_PASSWORD,
