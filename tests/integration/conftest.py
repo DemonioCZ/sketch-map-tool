@@ -22,15 +22,16 @@ from sketch_map_tool.upload_processing import clip
 from tests import FIXTURE_DIR
 
 from docker.models.containers import Container
-from testcontainers.postgres import PostgresContainer
-from testcontainers.core.container import DockerContainer, logger
-from testcontainers.core.docker_client import DockerClient as OriginalDockerClient, _stop_container
+from testcontainers.core.config import testcontainers_config as c
+from testcontainers.core.container import DockerContainer, logger, Reaper
+from testcontainers.core.docker_client import DockerClient
 
 #
 # Session wide test setup of DB (redis and postgres) and workers (flask and celery)
 #
 
-class DockerClient(OriginalDockerClient):
+
+class DockerClientExtended(DockerClient):
     def find_container_by_name(self, name: str) -> Container | None:
         for cnt in self.client.containers.list(all=True):
             if cnt.name == name:
@@ -38,7 +39,7 @@ class DockerClient(OriginalDockerClient):
         return None
 
 
-class PermanentContainer(DockerContainer):
+class DockerContainerPermanent(DockerContainer):
     """
     Docker testing container that has ability to keep using same container
     for multiple test runs.
@@ -56,67 +57,69 @@ class PermanentContainer(DockerContainer):
     """
 
     def __init__(self, *args, **kwargs):
-        self._keep_container = kwargs.pop("keep_container",  False)
+        self._keep_container = kwargs.pop("keep_container", False)
         super().__init__(*args, **kwargs)
 
     def start(self):
-        # return as fast as possible, if not using keep container
-        if not self._keep_container:
-            logger.info("Pulling image %s", self.image)
-            docker_client = self.get_docker_client()
-            self._container = docker_client.run(self.image,
-                                                command=self._command,
-                                                detach=True,
-                                                environment=self.env,
-                                                ports=self.ports,
-                                                name=self._name,
-                                                volumes=self.volumes,
-                                                **self._kwargs
-                                                )
-            logger.info("Container started: %s", self._container.short_id)
-            return self
-
-        if self._keep_container and not self._name:
-            raise Exception("If keep_container is used, name of container must be set")
-
-        existing_container = self.get_docker_client().find_container_by_name(self._name)
-        if existing_container:
-            if existing_container.status != "running":
-                existing_container.start()
-            logger.info("Using existing container %s", existing_container.id)
-            self._container = existing_container
-            return self
-
-        # since container is not found, this is probably the first run
+        if not c.ryuk_disabled and self.image != c.ryuk_image:
+            logger.debug("Creating Ryuk container")
+            Reaper.get_instance()
         logger.info("Pulling image %s", self.image)
-        docker_client = self.get_docker_client()
-        self._container = docker_client.run(self.image,
-                                            command=self._command,
-                                            detach=True,
-                                            environment=self.env,
-                                            ports=self.ports,
-                                            name=self._name,
-                                            volumes=self.volumes,
-                                            **self._kwargs
-                                            )
-        logger.info("Container started: %s", self._container.short_id)
+        self._configure()
+        if self._keep_container:
+            if not self._name:
+                raise Exception(
+                    "If keep_container is used, name of container must be set"
+                )
+            container = self.get_docker_client().find_container_by_name(self._name)
+            if container:
+                if container.status != "running":
+                    container.start()
+                self._container = container
+                logger.info("Existing container started: %s", container.id)
+            else:
+                self._start()
+        else:
+            self._start()
+
+        if self._network:
+            self._network.connect(self._container.id, self._network_aliases)
         return self
+
+    def _start(self):
+        # original code
+        self._container = self.get_docker_client().run(
+            self.image,
+            command=self._command,
+            detach=True,
+            environment=self.env,
+            ports=self.ports,
+            name=self._name,
+            volumes=self.volumes,
+            **self._kwargs,
+        )
+        logger.info("Container started: %s", self._container.short_id)
 
     def stop(self, force=True, delete_volume=True):
         if self._keep_container:
+            self._container.stop()
             return
+        self.get_docker_client().client.close()
         return super().stop(force, delete_volume)
 
-    def get_docker_client(self) -> DockerClient:
-        return DockerClient()
-
-    def with_keep_container(self, keep: bool = True):
+    def with_reuse(self, keep: bool = True):
         self._keep_container = keep
+        return self
 
-class PermanentPostgresContainer(PostgresContainer, PermanentContainer):
+    def get_docker_client(self) -> DockerClientExtended:
+        return DockerClientExtended()
+
+
+class PostgresContainerPermanent(PostgresContainer, DockerContainerPermanent):
     """
     Postgres variant of permanent container. See docs for PermanentContainer for details.
     """
+
     pass
 
 
@@ -126,12 +129,14 @@ def postgres_container(monkeypatch_session):
 
     Connection string will be different for each test session.
     """
-    with PermanentPostgresContainer("postgres:15").with_name("smt-db").with_keep_container() as postgres:
+    with PostgresContainerPermanent("postgres:15").with_name(
+        "smt-db"
+    ).with_reuse() as postgres:
         conn = "db+postgresql://{user}:{password}@127.0.0.1:{port}/{database}".format(
-            user=postgres.POSTGRES_USER,
-            password=postgres.POSTGRES_PASSWORD,
+            user=postgres.username,
+            password=postgres.password,
             port=postgres.get_exposed_port(5432),  # 5432 is default port of postgres
-            database=postgres.POSTGRES_DB,
+            database=postgres.dbname,
         )
         monkeypatch_session.setitem(DEFAULT_CONFIG, "result-backend", conn)
         yield {"connection_url": conn}
