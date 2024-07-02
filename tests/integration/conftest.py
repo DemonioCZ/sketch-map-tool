@@ -1,6 +1,7 @@
 import json
 from io import BytesIO
 from uuid import UUID
+from typing import override
 
 import fitz
 import pytest
@@ -25,10 +26,6 @@ from docker.models.containers import Container
 from testcontainers.core.config import testcontainers_config as c
 from testcontainers.core.container import DockerContainer, logger, Reaper
 from testcontainers.core.docker_client import DockerClient
-
-#
-# Session wide test setup of DB (redis and postgres) and workers (flask and celery)
-#
 
 
 class DockerClientExtended(DockerClient):
@@ -57,16 +54,17 @@ class DockerContainerPermanent(DockerContainer):
     """
 
     def __init__(self, *args, **kwargs):
-        self._keep_container = kwargs.pop("keep_container", False)
+        self._reuse = kwargs.pop("reuse", False)
         super().__init__(*args, **kwargs)
 
+    @override
     def start(self):
         if not c.ryuk_disabled and self.image != c.ryuk_image:
             logger.debug("Creating Ryuk container")
             Reaper.get_instance()
         logger.info("Pulling image %s", self.image)
         self._configure()
-        if self._keep_container:
+        if self._reuse:
             if not self._name:
                 raise Exception(
                     "If keep_container is used, name of container must be set"
@@ -100,29 +98,32 @@ class DockerContainerPermanent(DockerContainer):
         )
         logger.info("Container started: %s", self._container.short_id)
 
+    @override
     def stop(self, force=True, delete_volume=True):
-        if self._keep_container:
+        if self._reuse:
             self._container.stop()
             return
         self.get_docker_client().client.close()
         return super().stop(force, delete_volume)
 
-    def with_reuse(self, keep: bool = True):
-        self._keep_container = keep
+    def with_reuse(self, reuse: bool = True):
+        self._reuse = reuse
         return self
 
+    @override
     def get_docker_client(self) -> DockerClientExtended:
         return DockerClientExtended()
 
 
 class PostgresContainerPermanent(PostgresContainer, DockerContainerPermanent):
-    """
-    Postgres variant of permanent container. See docs for PermanentContainer for details.
-    """
+    """Postgres variant of permanent container. See docs for PermanentContainer."""
 
     pass
 
 
+#
+# Session wide test setup of DB (redis and postgres) and workers (flask and celery)
+#
 @pytest.fixture(scope="session", autouse=True)
 def postgres_container(monkeypatch_session):
     """Spin up a Postgres container available for all tests.
