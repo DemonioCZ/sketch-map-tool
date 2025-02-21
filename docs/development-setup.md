@@ -86,7 +86,6 @@ Please refer to the [configuration documentation](/docs/configuration.md).
 ### 1. Start Celery (Task Queue)
 
 ```bash
-mamba activate smt
 docker start smt-postgres smt-redis
 celery --app sketch_map_tool.tasks worker --beat --pool solo --loglevel=INFO
 ```
@@ -94,7 +93,6 @@ celery --app sketch_map_tool.tasks worker --beat --pool solo --loglevel=INFO
 ### 2. Start Flask (Web App)
 
 ```bash
-mamba activate smt
 pybabel compile -d sketch_map_tool/translations
 flask --app sketch_map_tool/routes.py --debug run
 # Go to http://127.0.0.1:5000
